@@ -11,28 +11,29 @@ from itertools import zip_longest
 import anndata as ann 
 
 
-def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbors=6, single_cell=False, eff_dist=None):
+def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbors=6, single_cell=False, eff_dist=None, kernel_type='rbf'):
     """
-    compute weight matrix based on radial basis kernel.
+    compute weight matrix based on selected kernel (RBF or Cauchy).
     cutoff & n_neighbors are two alternative options to restrict signaling range.
-    :param l: radial basis kernel parameter, need to be customized for optimal weight gradient and \
+    :param l: kernel parameter, need to be customized for optimal weight gradient and \
     to restrain the range of signaling before downstream processing.
-    :param cutoff: (for secreted signaling) minimum weight to be kept from the rbf weight matrix. \
+    :param cutoff: (for secreted signaling) minimum weight to be kept from the kernel weight matrix. \
     Weight below cutoff will be made zero
-    :param n_neighbors: (for secreted signaling) number of neighbors per spot from the rbf weight matrix.
-    :param n_nearest_neighbors: (for adjacent signaling) number of neighbors per spot from the rbf \
+    :param n_neighbors: (for secreted signaling) number of neighbors per spot from the kernel weight matrix.
+    :param n_nearest_neighbors: (for adjacent signaling) number of neighbors per spot from the kernel \
     weight matrix.
-    Non-neighbors will be made 0
     :param single_cell: if single cell resolution, diagonal will be made 0.
+    :param kernel_type: 'rbf' or 'cauchy', determines which kernel function to use.
+    Non-neighbors will be made 0
     :return: secreted signaling weight matrix: adata.obsp['weight'], \
             and adjacent signaling weight matrix: adata.obsp['nearest_neighbors']
     """
     def _Euclidean_to_RBF(X, l, singlecell=single_cell):
         """Convert Euclidean distance to RBF distance"""
         from scipy.sparse import issparse
-        if issparse:
-            rbf_d = X
-            rbf_d[X.nonzero()] = np.exp(-X[X.nonzero()].A**2 / (2 * l ** 2))
+        if issparse(X):
+            rbf_d = X.copy()
+            rbf_d.data = np.exp(-rbf_d.data**2 / (2 * l ** 2))
         else:
             rbf_d = np.exp(- X**2 / (2 * l ** 2))
         
@@ -40,11 +41,44 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
         if singlecell:
             np.fill_diagonal(rbf_d, 0)
         else:
-            rbf_d.setdiag(np.exp(-X.diagonal()**2 / (2 * l ** 2)))
+            if issparse(X):
+                rbf_d.setdiag(np.exp(-X.diagonal()**2 / (2 * l ** 2)))
+            else:
+                np.fill_diagonal(rbf_d, np.exp(-np.diag(X)**2 / (2 * l ** 2)))
 
         return rbf_d
     
+    def _Euclidean_to_Cauchy(X, l, singlecell=single_cell):
+        """Convert Euclidean distance to Cauchy distance"""
+        from scipy.sparse import issparse
+        if issparse(X):
+            cauchy_d = X.copy()
+            cauchy_d.data = 1.0 / (1.0 + (cauchy_d.data**2 / l**2))
+        else:
+            cauchy_d = 1.0 / (1.0 + (X**2 / l**2))
+        
+        # At single-cell resolution, no within-spot communications
+        if singlecell:
+            np.fill_diagonal(cauchy_d, 0)
+        else:
+            if issparse(X):
+                cauchy_d.setdiag(1.0 / (1.0 + (X.diagonal()**2 / l**2)))
+            else:
+                np.fill_diagonal(cauchy_d, 1.0 / (1.0 + (np.diag(X)**2 / l**2)))
+
+        return cauchy_d
+    
+    # Select kernel function based on kernel_type parameter
+    if kernel_type.lower() == 'rbf':
+        kernel_func = _Euclidean_to_RBF
+    elif kernel_type.lower() == 'cauchy':
+        kernel_func = _Euclidean_to_Cauchy
+    else:
+        raise ValueError(f"Unsupported kernel type: {kernel_type}. Use 'rbf' or 'cauchy'.")
+    
     adata.uns['single_cell'] = single_cell
+    adata.uns['kernel_type'] = kernel_type
+    
     if isinstance(adata.obsm['spatial'], pd.DataFrame):
         X_loc = adata.obsm['spatial'].values
     else:
@@ -57,7 +91,12 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
         if eff_dist is None:
             raise ValueError('At least one of l and eff_dist params should be specified')
         else:
-            l = np.sqrt(-eff_dist/(2*np.log(cutoff)))
+            # Note: This calculation is for RBF kernel and might need adjustment for Cauchy kernel
+            if kernel_type.lower() == 'rbf':
+                l = np.sqrt(-eff_dist/(2*np.log(cutoff)))
+            else:  # cauchy
+                l = np.sqrt(eff_dist * ((1/cutoff) - 1))
+                
     ## large neighborhood for W (5 layers)
     nnbrs = NearestNeighbors(
         n_neighbors=n_neighbors,
@@ -65,36 +104,25 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
         metric='euclidean'
     ).fit(X_loc)
     nbr_d = nnbrs.kneighbors_graph(X_loc, mode='distance')
-    rbf_d = _Euclidean_to_RBF(nbr_d, l, single_cell)
+    weighted_d = kernel_func(nbr_d, l, single_cell)
 
-    ## small neighborhood for RBF
+    ## small neighborhood for kernel
     nnbrs0 = NearestNeighbors(
         n_neighbors=n_nearest_neighbors, 
         algorithm='ball_tree', 
         metric='euclidean'
     ).fit(X_loc)
     nbr_d0 = nnbrs0.kneighbors_graph(X_loc, mode='distance')
-    rbf_d0 = _Euclidean_to_RBF(nbr_d0, l, single_cell)
+    weighted_d0 = kernel_func(nbr_d0, l, single_cell)
 
-    # NOTE: add more info about cutoff, n_neighbors and n_nearest_neighbors
-    #if cutoff:
-        # not efficient
-        # rbf_d[rbf_d < cutoff] = 0
-        
-        # more efficient: 
-        # https://seanlaw.github.io/2019/02/27/set-values-in-sparse-matrix/
-    nonzero_mask = np.array(rbf_d[rbf_d.nonzero()] < cutoff)[0]
-    rows = rbf_d.nonzero()[0][nonzero_mask]
-    cols = rbf_d.nonzero()[1][nonzero_mask]
-    rbf_d[rows, cols] = 0
+    # Filter out small weights
+    nonzero_mask = np.array(weighted_d[weighted_d.nonzero()] < cutoff)[0]
+    rows = weighted_d.nonzero()[0][nonzero_mask]
+    cols = weighted_d.nonzero()[1][nonzero_mask]
+    weighted_d[rows, cols] = 0
 
-    # elif n_neighbors:
-    #     nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm='ball_tree').fit(rbf_d)
-    #     knn = nbrs.kneighbors_graph(rbf_d).toarray()
-    #     rbf_d = rbf_d * knn
-
-    adata.obsp['weight'] = rbf_d * adata.shape[0] / rbf_d.sum()
-    adata.obsp['nearest_neighbors'] = rbf_d0 * adata.shape[0] / rbf_d0.sum()
+    adata.obsp['weight'] = weighted_d * adata.shape[0] / weighted_d.sum()
+    adata.obsp['nearest_neighbors'] = weighted_d0 * adata.shape[0] / weighted_d0.sum()
     return
 
 def extract_lr(adata, species, mean='algebra', min_cell=0, datahost='builtin'):
@@ -449,3 +477,35 @@ def compute_pathway(sample=None,
 #             for k in _data.keys():
 #                 read_sample.__dict__[k] = _data[k]
 #     return read_sample
+
+
+# In main.py (which is in the spatialdm directory)
+from spatialdm.datasets.dataset import melanoma
+import matplotlib.pyplot as plt
+
+# Load the dataset
+adata = melanoma()
+
+weight_matrix(adata, l=1.2, cutoff=0.2, single_cell=False, kernel_type='rbf') # weight_matrix by rbf kernel
+
+plt.figure(figsize=(3,3))
+
+# plt.scatter(adata.obsm['spatial'][:,0], adata.obsm['spatial'][:,1],
+#             c=adata.obsp['weight'][50])
+
+plt.scatter(adata.obsm['spatial'][:,0], adata.obsm['spatial'][:,1],
+            c=adata.obsp['weight'].toarray()[50])
+
+plt.savefig('RBF-Kernel-tut')
+
+weight_matrix(adata, l=1.2, cutoff=0.2, single_cell=False, kernel_type='cauchy') # weight_matrix by rbf kernel
+
+plt.figure(figsize=(3,3))
+
+# plt.scatter(adata.obsm['spatial'][:,0], adata.obsm['spatial'][:,1],
+#             c=adata.obsp['weight'][50])
+
+plt.scatter(adata.obsm['spatial'][:,0], adata.obsm['spatial'][:,1],
+            c=adata.obsp['weight'].toarray()[50])
+
+plt.savefig('CAUCHY-Kernel-tut')
