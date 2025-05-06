@@ -28,45 +28,45 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
     :return: secreted signaling weight matrix: adata.obsp['weight'], \
             and adjacent signaling weight matrix: adata.obsp['nearest_neighbors']
     """
-    # def _Euclidean_to_RBF(X, l, singlecell=single_cell):
-    #     """Convert Euclidean distance to RBF distance"""
-    #     from scipy.sparse import issparse
-    #     if issparse(X):
-    #         rbf_d = X.copy()
-    #         rbf_d.data = np.exp(-rbf_d.data**2 / (2 * l ** 2))
-    #     else:
-    #         rbf_d = np.exp(- X**2 / (2 * l ** 2))
-        
-    #     # At single-cell resolution, no within-spot communications
-    #     if singlecell:
-    #         np.fill_diagonal(rbf_d, 0)
-    #     else:
-    #         if issparse(X):
-    #             rbf_d.setdiag(np.exp(-X.diagonal()**2 / (2 * l ** 2)))
-    #         else:
-    #             np.fill_diagonal(rbf_d, np.exp(-np.diag(X)**2 / (2 * l ** 2)))
-
-    #     return rbf_d
-    
-    def _Euclidean_to_Cauchy(X, l, singlecell=single_cell):
-        """Convert Euclidean distance to Cauchy distance"""
+    def _Euclidean_to_RBF(X, l, singlecell=single_cell):
+        """Convert Euclidean distance to RBF distance"""
         from scipy.sparse import issparse
         if issparse(X):
-            cauchy_d = X.copy()
-            cauchy_d.data = 1.0 / (1.0 + (cauchy_d.data**2 / l**2))
+            rbf_d = X.copy()
+            rbf_d.data = np.exp(-rbf_d.data**2 / (2 * l ** 2))
         else:
-            cauchy_d = 1.0 / (1.0 + (X**2 / l**2))
+            rbf_d = np.exp(- X**2 / (2 * l ** 2))
         
         # At single-cell resolution, no within-spot communications
         if singlecell:
-            np.fill_diagonal(cauchy_d, 0)
+            rbf_d.setdiag(0)  
         else:
             if issparse(X):
-                cauchy_d.setdiag(1.0 / (1.0 + (X.diagonal()**2 / l**2)))
+                rbf_d.setdiag(np.exp(-X.diagonal()**2 / (2 * l ** 2)))
             else:
-                np.fill_diagonal(cauchy_d, 1.0 / (1.0 + (np.diag(X)**2 / l**2)))
+                np.fill_diagonal(rbf_d, np.exp(-np.diag(X)**2 / (2 * l ** 2)))
 
-        return cauchy_d
+        return rbf_d
+    
+    # def _Euclidean_to_Cauchy(X, l, singlecell=single_cell):
+    #     """Convert Euclidean distance to Cauchy distance"""
+    #     from scipy.sparse import issparse
+    #     if issparse(X):
+    #         cauchy_d = X.copy()
+    #         cauchy_d.data = 1.0 / (1.0 + (cauchy_d.data**2 / l**2))
+    #     else:
+    #         cauchy_d = 1.0 / (1.0 + (X**2 / l**2))
+        
+    #     # At single-cell resolution, no within-spot communications
+    #     if singlecell:
+    #         np.fill_diagonal(cauchy_d, 0)
+    #     else:
+    #         if issparse(X):
+    #             cauchy_d.setdiag(1.0 / (1.0 + (X.diagonal()**2 / l**2)))
+    #         else:
+    #             np.fill_diagonal(cauchy_d, 1.0 / (1.0 + (np.diag(X)**2 / l**2)))
+
+    #     return cauchy_d
     
     # Select kernel function based on kernel_type parameter
     # if kernel_type.lower() == 'rbf':
@@ -99,7 +99,7 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
         metric='euclidean'
     ).fit(X_loc)
     nbr_d = nnbrs.kneighbors_graph(X_loc, mode='distance')
-    weighted_d = _Euclidean_to_Cauchy(nbr_d, l, single_cell)
+    weighted_d = _Euclidean_to_RBF(nbr_d, l, single_cell)
 
     ## small neighborhood for kernel
     nnbrs0 = NearestNeighbors(
