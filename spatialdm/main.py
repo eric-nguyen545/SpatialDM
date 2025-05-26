@@ -11,7 +11,7 @@ from itertools import zip_longest
 import anndata as ann 
 
 
-def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbors=6, single_cell=False, eff_dist=None):
+def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbors=6, single_cell=False, eff_dist=None, kernel_type='rbf'):
     """
     compute weight matrix based on selected kernel (RBF or Cauchy).
     cutoff & n_neighbors are two alternative options to restrict signaling range.
@@ -39,7 +39,7 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
         
         # At single-cell resolution, no within-spot communications
         if singlecell:
-            rbf_d.setdiag(0)  
+            np.fill_diagonal(rbf_d, 0)
         else:
             if issparse(X):
                 rbf_d.setdiag(np.exp(-X.diagonal()**2 / (2 * l ** 2)))
@@ -48,35 +48,36 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
 
         return rbf_d
     
-    # def _Euclidean_to_Cauchy(X, l, singlecell=single_cell):
-    #     """Convert Euclidean distance to Cauchy distance"""
-    #     from scipy.sparse import issparse
-    #     if issparse(X):
-    #         cauchy_d = X.copy()
-    #         cauchy_d.data = 1.0 / (1.0 + (cauchy_d.data**2 / l**2))
-    #     else:
-    #         cauchy_d = 1.0 / (1.0 + (X**2 / l**2))
+    def _Euclidean_to_Cauchy(X, l, singlecell=single_cell):
+        """Convert Euclidean distance to Cauchy distance"""
+        from scipy.sparse import issparse
+        if issparse(X):
+            cauchy_d = X.copy()
+            cauchy_d.data = 1.0 / (1.0 + (cauchy_d.data**2 / l**2))
+        else:
+            cauchy_d = 1.0 / (1.0 + (X**2 / l**2))
         
-    #     # At single-cell resolution, no within-spot communications
-    #     if singlecell:
-    #         np.fill_diagonal(cauchy_d, 0)
-    #     else:
-    #         if issparse(X):
-    #             cauchy_d.setdiag(1.0 / (1.0 + (X.diagonal()**2 / l**2)))
-    #         else:
-    #             np.fill_diagonal(cauchy_d, 1.0 / (1.0 + (np.diag(X)**2 / l**2)))
+        # At single-cell resolution, no within-spot communications
+        if singlecell:
+            np.fill_diagonal(cauchy_d, 0)
+        else:
+            if issparse(X):
+                cauchy_d.setdiag(1.0 / (1.0 + (X.diagonal()**2 / l**2)))
+            else:
+                np.fill_diagonal(cauchy_d, 1.0 / (1.0 + (np.diag(X)**2 / l**2)))
 
-    #     return cauchy_d
+        return cauchy_d
     
     # Select kernel function based on kernel_type parameter
-    # if kernel_type.lower() == 'rbf':
-    #     kernel_func = _Euclidean_to_RBF
-    # elif kernel_type.lower() == 'cauchy':
-    #     kernel_func = _Euclidean_to_Cauchy
-    # else:
-    #     raise ValueError(f"Unsupported kernel type: {kernel_type}. Use 'rbf' or 'cauchy'.")
+    if kernel_type.lower() == 'rbf':
+        kernel_func = _Euclidean_to_RBF
+    elif kernel_type.lower() == 'cauchy':
+        kernel_func = _Euclidean_to_Cauchy
+    else:
+        raise ValueError(f"Unsupported kernel type: {kernel_type}. Use 'rbf' or 'cauchy'.")
     
     adata.uns['single_cell'] = single_cell
+    adata.uns['kernel_type'] = kernel_type
     
     if isinstance(adata.obsm['spatial'], pd.DataFrame):
         X_loc = adata.obsm['spatial'].values
@@ -90,7 +91,11 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
         if eff_dist is None:
             raise ValueError('At least one of l and eff_dist params should be specified')
         else:
-            l = np.sqrt(eff_dist * ((1/cutoff) - 1))
+            # Note: This calculation is for RBF kernel and might need adjustment for Cauchy kernel
+            if kernel_type.lower() == 'rbf':
+                l = np.sqrt(-eff_dist/(2*np.log(cutoff)))
+            else:  # cauchy
+                l = np.sqrt(eff_dist * ((1/cutoff) - 1))
                 
     ## large neighborhood for W (5 layers)
     nnbrs = NearestNeighbors(
@@ -99,7 +104,7 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
         metric='euclidean'
     ).fit(X_loc)
     nbr_d = nnbrs.kneighbors_graph(X_loc, mode='distance')
-    weighted_d = _Euclidean_to_RBF(nbr_d, l, single_cell)
+    weighted_d = kernel_func(nbr_d, l, single_cell)
 
     ## small neighborhood for kernel
     nnbrs0 = NearestNeighbors(
@@ -108,7 +113,7 @@ def weight_matrix(adata, l=None, cutoff=0.1, n_neighbors=None, n_nearest_neighbo
         metric='euclidean'
     ).fit(X_loc)
     nbr_d0 = nnbrs0.kneighbors_graph(X_loc, mode='distance')
-    weighted_d0 = _Euclidean_to_Cauchy(nbr_d0, l, single_cell)
+    weighted_d0 = kernel_func(nbr_d0, l, single_cell)
 
     # Filter out small weights
     nonzero_mask = np.array(weighted_d[weighted_d.nonzero()] < cutoff)[0]
